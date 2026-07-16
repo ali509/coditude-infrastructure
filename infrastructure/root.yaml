@@ -3,7 +3,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Root CloudFormation template for the Coditude DevOps assessment. It
   orchestrates reusable network, security, database, container foundation, and
-  container application nested stacks.
+  container and EC2 application nested stacks.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -21,6 +21,7 @@ Metadata:
           - DeployContainerFoundation
           - EnablePrivateEndpoints
           - DeployContainerApplication
+          - DeployEc2Platform
       - Label:
           default: Container application release
         Parameters:
@@ -79,6 +80,16 @@ Parameters:
       - "true"
       - "false"
 
+  DeployEc2Platform:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Creates the billable non-containerized EC2, ALB, Auto Scaling, CodeDeploy,
+      and monitoring resources.
+
   FrontendImageTag:
     Type: String
     Default: initial
@@ -108,6 +119,12 @@ Mappings:
       FrontendMaximumCount: 3
       BackendDesiredCount: 1
       BackendMaximumCount: 3
+      FrontendEc2InstanceType: t3.micro
+      BackendEc2InstanceType: t3.micro
+      FrontendEc2DesiredCapacity: 1
+      FrontendEc2MaximumCapacity: 2
+      BackendEc2DesiredCapacity: 1
+      BackendEc2MaximumCapacity: 2
     staging:
       NatGatewayStrategy: single
       EnableFlowLogs: "false"
@@ -120,6 +137,12 @@ Mappings:
       FrontendMaximumCount: 4
       BackendDesiredCount: 1
       BackendMaximumCount: 4
+      FrontendEc2InstanceType: t3.small
+      BackendEc2InstanceType: t3.small
+      FrontendEc2DesiredCapacity: 1
+      FrontendEc2MaximumCapacity: 3
+      BackendEc2DesiredCapacity: 1
+      BackendEc2MaximumCapacity: 3
     prod:
       NatGatewayStrategy: per-az
       EnableFlowLogs: "true"
@@ -132,6 +155,12 @@ Mappings:
       FrontendMaximumCount: 10
       BackendDesiredCount: 2
       BackendMaximumCount: 10
+      FrontendEc2InstanceType: t3.medium
+      BackendEc2InstanceType: t3.medium
+      FrontendEc2DesiredCapacity: 2
+      FrontendEc2MaximumCapacity: 6
+      BackendEc2DesiredCapacity: 2
+      BackendEc2MaximumCapacity: 6
 
 Rules:
   ContainerApplicationRequiresDatabase:
@@ -177,6 +206,16 @@ Rules:
           - "true"
         AssertDescription: Interface endpoints belong to the container foundation.
 
+  Ec2PlatformRequiresDatabase:
+    RuleCondition: !Equals
+      - !Ref DeployEc2Platform
+      - "true"
+    Assertions:
+      - Assert: !Equals
+          - !Ref DeployDatabase
+          - "true"
+        AssertDescription: The EC2 platform requires the database stack.
+
 Conditions:
   CreateDatabase: !Equals
     - !Ref DeployDatabase
@@ -187,6 +226,9 @@ Conditions:
   CreateContainerApplication: !Equals
     - !Ref DeployContainerApplication
     - "true"
+  CreateEc2Platform: !Equals
+    - !Ref DeployEc2Platform
+    - "true"
 
 Resources:
   NetworkStack:
@@ -196,10 +238,13 @@ Resources:
       Parameters:
         ProjectName: !Ref ProjectName
         Environment: !Ref Environment
-        NatGatewayStrategy: !FindInMap
-          - EnvironmentConfig
-          - !Ref Environment
-          - NatGatewayStrategy
+        NatGatewayStrategy: !If
+          - CreateEc2Platform
+          - single
+          - !FindInMap
+            - EnvironmentConfig
+            - !Ref Environment
+            - NatGatewayStrategy
         EnableS3Endpoint: "true"
         EnableFlowLogs: !FindInMap
           - EnvironmentConfig
@@ -225,9 +270,14 @@ Resources:
         ProjectName: !Ref ProjectName
         Environment: !Ref Environment
         VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        VpcCidr: !GetAtt NetworkStack.Outputs.VpcCidr
         AllowedWebCidr: !Ref AllowedWebCidr
         EnableHttpIngress: "true"
-        AllowApplicationInternetEgress: "false"
+        AllowApplicationInternetEgress: !If
+          - CreateEc2Platform
+          - "true"
+          - "false"
+        EnableLoadBalancerBackendRouting: !Ref DeployEc2Platform
       Tags:
         - Key: Project
           Value: coditude
@@ -351,6 +401,61 @@ Resources:
         - Key: ManagedBy
           Value: cloudformation
 
+  Ec2PlatformStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateEc2Platform
+    Properties:
+      TemplateURL: nested/ec2-platform.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnetIds: !GetAtt NetworkStack.Outputs.PublicSubnetIds
+        ApplicationSubnetIds: !GetAtt NetworkStack.Outputs.ApplicationSubnetIds
+        PublicLoadBalancerSecurityGroupId: !GetAtt SecurityStack.Outputs.PublicLoadBalancerSecurityGroupId
+        FrontendSecurityGroupId: !GetAtt SecurityStack.Outputs.FrontendSecurityGroupId
+        BackendSecurityGroupId: !GetAtt SecurityStack.Outputs.BackendSecurityGroupId
+        DatabaseEndpointAddress: !GetAtt DatabaseStack.Outputs.DatabaseEndpointAddress
+        DatabaseEndpointPort: !GetAtt DatabaseStack.Outputs.DatabaseEndpointPort
+        DatabaseName: !GetAtt DatabaseStack.Outputs.DatabaseName
+        DatabaseMasterUserSecretArn: !GetAtt DatabaseStack.Outputs.DatabaseMasterUserSecretArn
+        FrontendInstanceType: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - FrontendEc2InstanceType
+        BackendInstanceType: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - BackendEc2InstanceType
+        FrontendDesiredCapacity: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - FrontendEc2DesiredCapacity
+        FrontendMaximumCapacity: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - FrontendEc2MaximumCapacity
+        BackendDesiredCapacity: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - BackendEc2DesiredCapacity
+        BackendMaximumCapacity: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - BackendEc2MaximumCapacity
+        LogRetentionDays: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - LogRetentionDays
+        CertificateArn: !Ref CertificateArn
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
 Outputs:
   VpcId:
     Description: VPC created by the network nested stack.
@@ -398,3 +503,33 @@ Outputs:
     Condition: CreateContainerApplication
     Description: Public URL of the containerized application.
     Value: !GetAtt ContainerApplicationStack.Outputs.ApplicationUrl
+
+  Ec2ApplicationUrl:
+    Condition: CreateEc2Platform
+    Description: Public URL of the non-containerized application.
+    Value: !GetAtt Ec2PlatformStack.Outputs.ApplicationUrl
+
+  Ec2ArtifactBucketName:
+    Condition: CreateEc2Platform
+    Description: Artifact bucket used by the EC2 CodeDeploy pipelines.
+    Value: !GetAtt Ec2PlatformStack.Outputs.ArtifactBucketName
+
+  FrontendCodeDeployApplicationName:
+    Condition: CreateEc2Platform
+    Description: Frontend CodeDeploy application name.
+    Value: !GetAtt Ec2PlatformStack.Outputs.FrontendApplicationName
+
+  FrontendCodeDeployDeploymentGroupName:
+    Condition: CreateEc2Platform
+    Description: Frontend CodeDeploy deployment group name.
+    Value: !GetAtt Ec2PlatformStack.Outputs.FrontendDeploymentGroupName
+
+  BackendCodeDeployApplicationName:
+    Condition: CreateEc2Platform
+    Description: Backend CodeDeploy application name.
+    Value: !GetAtt Ec2PlatformStack.Outputs.BackendApplicationName
+
+  BackendCodeDeployDeploymentGroupName:
+    Condition: CreateEc2Platform
+    Description: Backend CodeDeploy deployment group name.
+    Value: !GetAtt Ec2PlatformStack.Outputs.BackendDeploymentGroupName

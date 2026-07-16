@@ -21,8 +21,7 @@ infrastructure/
     database.yaml
     container-foundation.yaml
     container-application.yaml
-    ec2-platform.yaml          # planned
-    monitoring.yaml            # planned
+    ec2-platform.yaml
     native-cicd.yaml           # planned
   policies/
     security.guard
@@ -44,6 +43,9 @@ CloudFormation root stack.
    service discovery, IAM, and optional private endpoints.
 5. `container-application.yaml` creates the ALB, task definitions, Fargate
    services, health checks, private backend discovery, and service scaling.
+6. `ec2-platform.yaml` creates the non-containerized ALB, private frontend and
+   backend Auto Scaling groups, CodeDeploy resources, Systems Manager access,
+   CloudWatch logs, scaling policies, and basic alarms.
 
 The container platform is split into foundation and application stacks because
 the ECR repositories must exist before the first immutable images can be
@@ -60,10 +62,32 @@ require explicit opt-in:
 | `DeployContainerFoundation` | `false` | Creates ECS, ECR, logs and discovery |
 | `EnablePrivateEndpoints` | `false` | Creates billable interface endpoints |
 | `DeployContainerApplication` | `false` | Creates ALB and Fargate services |
+| `DeployEc2Platform` | `false` | Creates NAT, ALB, EC2, ASG and CodeDeploy |
 
 Development and staging database stacks delete the database without retaining
 a final snapshot. Production uses deletion protection and
 `DeletionPolicy: Snapshot`.
+
+The EC2 deployment path needs outbound access from its private subnets to
+install and operate deployment agents. Enabling it selects one NAT Gateway,
+including for development. Review the change set and expected charges before
+executing this layer.
+
+## Basic Monitoring
+
+Monitoring is embedded in the workload templates instead of being maintained
+as a separate nested stack:
+
+- ECS and EC2 application logs are retained in CloudWatch Logs.
+- ALB target health checks identify unhealthy frontend and backend workloads.
+- ECS services and EC2 Auto Scaling groups use CPU-based scaling.
+- CloudWatch alarms cover unhealthy targets, sustained high ECS CPU, and ALB
+  server errors.
+- CodeDeploy stops and rolls back an EC2 release when its health alarms enter
+  the alarm state.
+
+This meets the assessment's monitoring requirement without adding a dashboard
+or a separate monitoring stack.
 
 ## Local Validation
 
@@ -73,6 +97,7 @@ Run credential-free checks:
 make infra-lint
 make infra-guard
 make root-lint
+make ec2-platform-validate
 ```
 
 Run AWS-side template validation with the configured profile:
