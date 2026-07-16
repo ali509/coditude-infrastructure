@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Creates the GitHub Actions OIDC provider and deployment role used by the
+  Coditude application repository.
+
+Parameters:
+  GitHubSubject:
+    Type: String
+    Default: >-
+      repo:ali509@39634565/coditude-application@1302738965:environment:dev
+    Description: Exact GitHub OIDC subject allowed to assume the role.
+
+  ProjectName:
+    Type: String
+    Default: coditude
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: ManagedBy
+          Value: cloudformation
+      Url: https://token.actions.githubusercontent.com
+
+  GitHubDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Ref GitHubSubject
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyName: PublishApplicationImages
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Project}/${Stage}/*"
+                  - Project: !Ref ProjectName
+                    Stage: !Ref Environment
+        - PolicyName: DeployContainerApplication
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                Resource:
+                  - !Sub
+                    - "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${Project}-${Stage}-*/*"
+                    - Project: !Ref ProjectName
+                      Stage: !Ref Environment
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Project}-${Stage}-container-application-*"
+                  - Project: !Ref ProjectName
+                    Stage: !Ref Environment
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName:
+                      - ecs.application-autoscaling.amazonaws.com
+                      - elasticloadbalancing.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - application-autoscaling:DeleteScalingPolicy
+                  - application-autoscaling:DeregisterScalableTarget
+                  - application-autoscaling:DescribeScalableTargets
+                  - application-autoscaling:DescribeScalingActivities
+                  - application-autoscaling:DescribeScalingPolicies
+                  - application-autoscaling:PutScalingPolicy
+                  - application-autoscaling:RegisterScalableTarget
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                  - ecs:CreateService
+                  - ecs:DeleteService
+                  - ecs:DeregisterTaskDefinition
+                  - ecs:DescribeClusters
+                  - ecs:DescribeServices
+                  - ecs:DescribeTaskDefinition
+                  - ecs:ListTagsForResource
+                  - ecs:RegisterTaskDefinition
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                  - ecs:UpdateService
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:CreateListener
+                  - elasticloadbalancing:CreateRule
+                  - elasticloadbalancing:CreateLoadBalancer
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:DeleteRule
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DescribeTags
+                  - elasticloadbalancing:ModifyLoadBalancerAttributes
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:ModifyTargetGroupAttributes
+                  - elasticloadbalancing:RemoveTags
+                  - elasticloadbalancing:SetSecurityGroups
+                  - elasticloadbalancing:SetSubnets
+                  - servicediscovery:CreateService
+                  - servicediscovery:DeleteService
+                  - servicediscovery:GetNamespace
+                  - servicediscovery:GetOperation
+                  - servicediscovery:GetService
+                  - servicediscovery:ListTagsForResource
+                  - servicediscovery:TagResource
+                  - servicediscovery:UntagResource
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  GitHubDeploymentRoleArn:
+    Description: Role ARN configured in the GitHub dev environment.
+    Value: !GetAtt GitHubDeploymentRole.Arn
+
+  GitHubOidcProviderArn:
+    Description: GitHub Actions OIDC provider ARN.
+    Value: !Ref GitHubOidcProvider
