@@ -73,6 +73,12 @@ install and operate deployment agents. Enabling it selects one NAT Gateway,
 including for development. Review the change set and expected charges before
 executing this layer.
 
+Frontend instances install the namespaced Amazon Linux Node.js 22 runtime and
+receive a non-secret `BACKEND_URL` environment file that points to the
+Application Load Balancer. Backend database credentials are not placed in
+CloudFormation user data or CodeDeploy bundles; their secure runtime resolution
+must be completed before executing the EC2 platform.
+
 ## Basic Monitoring
 
 Monitoring is embedded in the workload templates instead of being maintained

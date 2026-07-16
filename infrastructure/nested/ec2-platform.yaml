@@ -425,12 +425,21 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             set -euxo pipefail
-            dnf install -y ruby wget amazon-cloudwatch-agent
+            dnf install -y \
+              ruby \
+              wget \
+              amazon-cloudwatch-agent \
+              nodejs22 \
+              nodejs22-npm
             cd /tmp
             wget "https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/latest/install"
             chmod +x install
             ./install auto
             mkdir -p /opt/coditude/frontend /var/log/coditude
+            cat > /etc/coditude-frontend.env <<EOF
+            BACKEND_URL=http://${PublicLoadBalancer.DNSName}
+            EOF
+            chmod 600 /etc/coditude-frontend.env
             cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
             {
               "logs": {
