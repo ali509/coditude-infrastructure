@@ -76,8 +76,8 @@ executing this layer.
 Frontend instances install the namespaced Amazon Linux Node.js 22 runtime and
 receive a non-secret `BACKEND_URL` environment file that points to the
 Application Load Balancer. Backend database credentials are not placed in
-CloudFormation user data or CodeDeploy bundles; their secure runtime resolution
-must be completed before executing the EC2 platform.
+CloudFormation user data or CodeDeploy bundles. The backend reads the
+RDS-managed secret at startup using its EC2 instance role.
 
 ## Basic Monitoring
 
