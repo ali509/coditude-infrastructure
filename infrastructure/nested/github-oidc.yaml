@@ -172,6 +172,28 @@ Resources:
                   - servicediscovery:TagResource
                   - servicediscovery:UntagResource
                 Resource: "*"
+        - PolicyName: DeployEc2Application
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:s3:::${Project}-${Stage}-ec2-platform-deploymentartifactbucket-*/releases/*"
+                  - Project: !Ref ProjectName
+                    Stage: !Ref Environment
+              - Effect: Allow
+                Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetDeploymentGroup
+                  - codedeploy:UpdateDeploymentGroup
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${Project}-${Stage}-*/${Project}-${Stage}-*"
+                  - Project: !Ref ProjectName
+                    Stage: !Ref Environment
       Tags:
         - Key: Project
           Value: coditude
@@ -182,7 +204,7 @@ Resources:
 
 Outputs:
   GitHubDeploymentRoleArn:
-    Description: Role ARN configured in the GitHub dev environment.
+    Description: Application deployment role configured in the GitHub environment.
     Value: !GetAtt GitHubDeploymentRole.Arn
 
   GitHubOidcProviderArn:

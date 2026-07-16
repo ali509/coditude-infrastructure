@@ -298,7 +298,7 @@ Resources:
     Properties:
       HealthCheckEnabled: true
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /
+      HealthCheckPath: /api/health
       HealthCheckPort: traffic-port
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 5
@@ -308,6 +308,9 @@ Resources:
       Port: 3000
       Protocol: HTTP
       TargetType: instance
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
       UnhealthyThresholdCount: 3
       VpcId: !Ref VpcId
       Tags:
@@ -331,6 +334,9 @@ Resources:
       Port: 8000
       Protocol: HTTP
       TargetType: instance
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
       UnhealthyThresholdCount: 3
       VpcId: !Ref VpcId
       Tags:
@@ -400,6 +406,36 @@ Resources:
       ListenerArn: !Ref HttpsListener
       Priority: 10
 
+  PublicLoadBalancerToBackendEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Forward API requests to the EC2 backend
+      DestinationSecurityGroupId: !Ref BackendSecurityGroupId
+      FromPort: 8000
+      GroupId: !Ref PublicLoadBalancerSecurityGroupId
+      IpProtocol: tcp
+      ToPort: 8000
+
+  BackendFromPublicLoadBalancerIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Receive EC2 API requests from the public load balancer
+      FromPort: 8000
+      GroupId: !Ref BackendSecurityGroupId
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroupId
+      ToPort: 8000
+
+  FrontendInternetHttpEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: 0.0.0.0/0
+      Description: Call the public EC2 application endpoint through NAT
+      FromPort: 80
+      GroupId: !Ref FrontendSecurityGroupId
+      IpProtocol: tcp
+      ToPort: 80
+
   FrontendLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
@@ -421,6 +457,17 @@ Resources:
           HttpTokens: required
         SecurityGroupIds:
           - !Ref FrontendSecurityGroupId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${ProjectName}-${Environment}-frontend"
+              - Key: Project
+                Value: coditude
+              - Key: Environment
+                Value: !Ref Environment
+              - Key: ManagedBy
+                Value: cloudformation
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
@@ -468,18 +515,6 @@ Resources:
               -a fetch-config -m ec2 \
               -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
               -s
-      TagSpecifications:
-        - ResourceType: instance
-          Tags:
-            - Key: Name
-              Value: !Sub "${ProjectName}-${Environment}-frontend"
-            - Key: Project
-              Value: coditude
-            - Key: Environment
-              Value: !Ref Environment
-            - Key: ManagedBy
-              Value: cloudformation
-
   BackendLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
@@ -501,6 +536,17 @@ Resources:
           HttpTokens: required
         SecurityGroupIds:
           - !Ref BackendSecurityGroupId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${ProjectName}-${Environment}-backend"
+              - Key: Project
+                Value: coditude
+              - Key: Environment
+                Value: !Ref Environment
+              - Key: ManagedBy
+                Value: cloudformation
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
@@ -547,24 +593,12 @@ Resources:
               -a fetch-config -m ec2 \
               -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
               -s
-      TagSpecifications:
-        - ResourceType: instance
-          Tags:
-            - Key: Name
-              Value: !Sub "${ProjectName}-${Environment}-backend"
-            - Key: Project
-              Value: coditude
-            - Key: Environment
-              Value: !Ref Environment
-            - Key: ManagedBy
-              Value: cloudformation
-
   FrontendAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       DesiredCapacity: !Ref FrontendDesiredCapacity
       HealthCheckGracePeriod: 300
-      HealthCheckType: ELB
+      HealthCheckType: EC2
       LaunchTemplate:
         LaunchTemplateId: !Ref FrontendLaunchTemplate
         Version: !GetAtt FrontendLaunchTemplate.LatestVersionNumber
@@ -589,7 +623,7 @@ Resources:
     Properties:
       DesiredCapacity: !Ref BackendDesiredCapacity
       HealthCheckGracePeriod: 300
-      HealthCheckType: ELB
+      HealthCheckType: EC2
       LaunchTemplate:
         LaunchTemplateId: !Ref BackendLaunchTemplate
         Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
