@@ -194,6 +194,10 @@ Resources:
                   - "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${Project}-${Stage}-*/${Project}-${Stage}-*"
                   - Project: !Ref ProjectName
                     Stage: !Ref Environment
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeploymentConfig
+                Resource: !Sub "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentconfig:*"
       Tags:
         - Key: Project
           Value: coditude
