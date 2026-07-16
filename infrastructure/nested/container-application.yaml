@@ -583,6 +583,60 @@ Resources:
         ScaleOutCooldown: 60
         TargetValue: 60
 
+  FrontendUnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Frontend ECS targets are unhealthy behind the ALB.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt PublicLoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt FrontendTargetGroup.TargetGroupFullName
+      EvaluationPeriods: 2
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  FrontendHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Frontend ECS service CPU remains above 80 percent.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ClusterName
+        - Name: ServiceName
+          Value: !GetAtt FrontendService.Name
+      EvaluationPeriods: 3
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      TreatMissingData: notBreaching
+
+  BackendHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Backend ECS service CPU remains above 80 percent.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ClusterName
+        - Name: ServiceName
+          Value: !GetAtt BackendService.Name
+      EvaluationPeriods: 3
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Period: 60
+      Statistic: Average
+      Threshold: 80
+      TreatMissingData: notBreaching
+
 Outputs:
   ApplicationUrl:
     Description: Public application URL.

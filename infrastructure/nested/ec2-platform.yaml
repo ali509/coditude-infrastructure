@@ -1,0 +1,775 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Creates the non-containerized Coditude deployment platform using private EC2
+  Auto Scaling groups, an Application Load Balancer, CodeDeploy, Systems
+  Manager, CloudWatch logs, scaling policies, and basic operational alarms.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Deployment configuration
+        Parameters:
+          - ProjectName
+          - Environment
+          - AmiId
+          - CertificateArn
+      - Label:
+          default: Network and security
+        Parameters:
+          - VpcId
+          - PublicSubnetIds
+          - ApplicationSubnetIds
+          - PublicLoadBalancerSecurityGroupId
+          - FrontendSecurityGroupId
+          - BackendSecurityGroupId
+      - Label:
+          default: Database
+        Parameters:
+          - DatabaseEndpointAddress
+          - DatabaseEndpointPort
+          - DatabaseName
+          - DatabaseMasterUserSecretArn
+      - Label:
+          default: Capacity
+        Parameters:
+          - FrontendInstanceType
+          - BackendInstanceType
+          - FrontendDesiredCapacity
+          - FrontendMaximumCapacity
+          - BackendDesiredCapacity
+          - BackendMaximumCapacity
+          - LogRetentionDays
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: coditude
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI resolved from public SSM parameters.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+
+  ApplicationSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+
+  PublicLoadBalancerSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+
+  FrontendSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+
+  BackendSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+
+  DatabaseEndpointAddress:
+    Type: String
+
+  DatabaseEndpointPort:
+    Type: Number
+    Default: 5432
+
+  DatabaseName:
+    Type: String
+
+  DatabaseMasterUserSecretArn:
+    Type: String
+
+  FrontendInstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+
+  BackendInstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+
+  FrontendDesiredCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+
+  FrontendMaximumCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+
+  BackendDesiredCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+
+  BackendMaximumCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 20
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues:
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+
+  CertificateArn:
+    Type: String
+    Default: ""
+
+Conditions:
+  HasCertificate: !Not
+    - !Equals
+      - !Ref CertificateArn
+      - ""
+  HasNoCertificate: !Equals
+    - !Ref CertificateArn
+    - ""
+
+Resources:
+  DeploymentArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNoncurrentVersions
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/coditude/${Environment}/ec2/frontend"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/coditude/${Environment}/ec2/backend"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy"
+      Policies:
+        - PolicyName: ReadDeploymentArtifactsAndDatabaseSecret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DeploymentArtifactBucket.Arn
+                  - !Sub "${DeploymentArtifactBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseMasterUserSecretArn
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSCodeDeployRole"
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSecurityGroupId
+      Subnets: !Ref PublicSubnetIds
+      Type: application
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-ec2-alb"
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200-399"
+      Port: 3000
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      Port: 8000
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - !If
+          - HasCertificate
+          - Type: redirect
+            RedirectConfig:
+              Port: "443"
+              Protocol: HTTPS
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref FrontendTargetGroup
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+  HttpBackendRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasNoCertificate
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /api/*
+      ListenerArn: !Ref HttpListener
+      Priority: 10
+
+  HttpsBackendRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /api/*
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+
+  FrontendLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              DeleteOnTermination: true
+              Encrypted: true
+              VolumeSize: 12
+              VolumeType: gp3
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        ImageId: !Ref AmiId
+        InstanceType: !Ref FrontendInstanceType
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 1
+          HttpTokens: required
+        SecurityGroupIds:
+          - !Ref FrontendSecurityGroupId
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y ruby wget amazon-cloudwatch-agent
+            cd /tmp
+            wget "https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/latest/install"
+            chmod +x install
+            ./install auto
+            mkdir -p /opt/coditude/frontend /var/log/coditude
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/coditude/frontend.log",
+                        "log_group_name": "${FrontendLogGroup}",
+                        "log_stream_name": "{instance_id}"
+                      },
+                      {
+                        "file_path": "/var/log/codedeploy-agent/codedeploy-agent.log",
+                        "log_group_name": "${FrontendLogGroup}",
+                        "log_stream_name": "{instance_id}/codedeploy"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            EOF
+            systemctl enable --now codedeploy-agent
+            systemctl enable amazon-cloudwatch-agent
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config -m ec2 \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+              -s
+      TagSpecifications:
+        - ResourceType: instance
+          Tags:
+            - Key: Name
+              Value: !Sub "${ProjectName}-${Environment}-frontend"
+            - Key: Project
+              Value: coditude
+            - Key: Environment
+              Value: !Ref Environment
+            - Key: ManagedBy
+              Value: cloudformation
+
+  BackendLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              DeleteOnTermination: true
+              Encrypted: true
+              VolumeSize: 12
+              VolumeType: gp3
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        ImageId: !Ref AmiId
+        InstanceType: !Ref BackendInstanceType
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpPutResponseHopLimit: 1
+          HttpTokens: required
+        SecurityGroupIds:
+          - !Ref BackendSecurityGroupId
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            dnf install -y ruby wget amazon-cloudwatch-agent
+            cd /tmp
+            wget "https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.${AWS::URLSuffix}/latest/install"
+            chmod +x install
+            ./install auto
+            mkdir -p /opt/coditude/backend /var/log/coditude
+            cat > /etc/coditude-backend.env <<EOF
+            APP_ENV=${Environment}
+            DB_HOST=${DatabaseEndpointAddress}
+            DB_PORT=${DatabaseEndpointPort}
+            DB_NAME=${DatabaseName}
+            DB_SECRET_ARN=${DatabaseMasterUserSecretArn}
+            EOF
+            chmod 600 /etc/coditude-backend.env
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/coditude/backend.log",
+                        "log_group_name": "${BackendLogGroup}",
+                        "log_stream_name": "{instance_id}"
+                      },
+                      {
+                        "file_path": "/var/log/codedeploy-agent/codedeploy-agent.log",
+                        "log_group_name": "${BackendLogGroup}",
+                        "log_stream_name": "{instance_id}/codedeploy"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            EOF
+            systemctl enable --now codedeploy-agent
+            systemctl enable amazon-cloudwatch-agent
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config -m ec2 \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+              -s
+      TagSpecifications:
+        - ResourceType: instance
+          Tags:
+            - Key: Name
+              Value: !Sub "${ProjectName}-${Environment}-backend"
+            - Key: Project
+              Value: coditude
+            - Key: Environment
+              Value: !Ref Environment
+            - Key: ManagedBy
+              Value: cloudformation
+
+  FrontendAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: !Ref FrontendDesiredCapacity
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref FrontendLaunchTemplate
+        Version: !GetAtt FrontendLaunchTemplate.LatestVersionNumber
+      MaxSize: !Ref FrontendMaximumCapacity
+      MinSize: !Ref FrontendDesiredCapacity
+      TargetGroupARNs:
+        - !Ref FrontendTargetGroup
+      VPCZoneIdentifier: !Ref ApplicationSubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-frontend"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: coditude
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
+
+  BackendAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: !Ref BackendDesiredCapacity
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BackendLaunchTemplate
+        Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
+      MaxSize: !Ref BackendMaximumCapacity
+      MinSize: !Ref BackendDesiredCapacity
+      TargetGroupARNs:
+        - !Ref BackendTargetGroup
+      VPCZoneIdentifier: !Ref ApplicationSubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-backend"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: coditude
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
+
+  FrontendScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref FrontendAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60
+
+  BackendScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref BackendAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60
+
+  FrontendUnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Frontend target is unhealthy behind the EC2 ALB.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt PublicLoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt FrontendTargetGroup.TargetGroupFullName
+      EvaluationPeriods: 2
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  BackendUnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Backend target is unhealthy behind the EC2 ALB.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt PublicLoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt BackendTargetGroup.TargetGroupFullName
+      EvaluationPeriods: 2
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  LoadBalancerServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Application Load Balancer is returning server errors.
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt PublicLoadBalancer.LoadBalancerFullName
+      EvaluationPeriods: 2
+      MetricName: HTTPCode_ELB_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 5
+      TreatMissingData: notBreaching
+
+  FrontendCodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ComputePlatform: Server
+      ApplicationName: !Sub "${ProjectName}-${Environment}-frontend"
+
+  BackendCodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ComputePlatform: Server
+      ApplicationName: !Sub "${ProjectName}-${Environment}-backend"
+
+  FrontendDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      AlarmConfiguration:
+        Alarms:
+          - Name: !Ref FrontendUnhealthyHostsAlarm
+          - Name: !Ref LoadBalancerServerErrorAlarm
+        Enabled: true
+        IgnorePollAlarmFailure: false
+      ApplicationName: !Ref FrontendCodeDeployApplication
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+      AutoScalingGroups:
+        - !Ref FrontendAutoScalingGroup
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
+      DeploymentGroupName: !Sub "${ProjectName}-${Environment}-frontend"
+      DeploymentStyle:
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+        DeploymentType: IN_PLACE
+      LoadBalancerInfo:
+        TargetGroupInfoList:
+          - Name: !GetAtt FrontendTargetGroup.TargetGroupName
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+
+  BackendDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      AlarmConfiguration:
+        Alarms:
+          - Name: !Ref BackendUnhealthyHostsAlarm
+          - Name: !Ref LoadBalancerServerErrorAlarm
+        Enabled: true
+        IgnorePollAlarmFailure: false
+      ApplicationName: !Ref BackendCodeDeployApplication
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+      AutoScalingGroups:
+        - !Ref BackendAutoScalingGroup
+      DeploymentConfigName: CodeDeployDefault.OneAtATime
+      DeploymentGroupName: !Sub "${ProjectName}-${Environment}-backend"
+      DeploymentStyle:
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+        DeploymentType: IN_PLACE
+      LoadBalancerInfo:
+        TargetGroupInfoList:
+          - Name: !GetAtt BackendTargetGroup.TargetGroupName
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+
+Outputs:
+  ApplicationUrl:
+    Description: Public URL of the non-containerized application.
+    Value: !If
+      - HasCertificate
+      - !Sub "https://${PublicLoadBalancer.DNSName}"
+      - !Sub "http://${PublicLoadBalancer.DNSName}"
+
+  ArtifactBucketName:
+    Description: S3 bucket for versioned CodeDeploy application bundles.
+    Value: !Ref DeploymentArtifactBucket
+
+  FrontendApplicationName:
+    Description: CodeDeploy application for the Next.js frontend.
+    Value: !Ref FrontendCodeDeployApplication
+
+  FrontendDeploymentGroupName:
+    Description: CodeDeploy deployment group for the Next.js frontend.
+    Value: !Ref FrontendDeploymentGroup
+
+  BackendApplicationName:
+    Description: CodeDeploy application for the FastAPI backend.
+    Value: !Ref BackendCodeDeployApplication
+
+  BackendDeploymentGroupName:
+    Description: CodeDeploy deployment group for the FastAPI backend.
+    Value: !Ref BackendDeploymentGroup
+
+  FrontendAutoScalingGroupName:
+    Description: Frontend Auto Scaling group.
+    Value: !Ref FrontendAutoScalingGroup
+
+  BackendAutoScalingGroupName:
+    Description: Backend Auto Scaling group.
+    Value: !Ref BackendAutoScalingGroup

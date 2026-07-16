@@ -14,12 +14,14 @@ Metadata:
           - ProjectName
           - Environment
           - VpcId
+          - VpcCidr
       - Label:
           default: Ingress and egress controls
         Parameters:
           - AllowedWebCidr
           - EnableHttpIngress
           - AllowApplicationInternetEgress
+          - EnableLoadBalancerBackendRouting
     ParameterLabels:
       ProjectName:
         default: Project name
@@ -27,12 +29,16 @@ Metadata:
         default: Environment
       VpcId:
         default: VPC ID
+      VpcCidr:
+        default: VPC CIDR
       AllowedWebCidr:
         default: Allowed client CIDR
       EnableHttpIngress:
         default: Enable HTTP ingress
       AllowApplicationInternetEgress:
         default: Allow HTTPS internet egress
+      EnableLoadBalancerBackendRouting:
+        default: Enable ALB to backend routing
 
 Parameters:
   ProjectName:
@@ -54,6 +60,11 @@ Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: VPC where the application security groups are created.
+
+  VpcCidr:
+    Type: String
+    AllowedPattern: "^(([0-9]{1,3}\\.){3}[0-9]{1,3})/([0-9]|[12][0-9]|3[0-2])$"
+    Description: VPC CIDR used for DNS resolver egress.
 
   AllowedWebCidr:
     Type: String
@@ -82,12 +93,25 @@ Parameters:
       Allows frontend and backend workloads to make outbound HTTPS requests.
       Enable only when private application subnets have NAT access.
 
+  EnableLoadBalancerBackendRouting:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Allows the public load balancer to route API paths directly to backend
+      workloads. This is used by the EC2 deployment path.
+
 Conditions:
   CreateHttpIngress: !Equals
     - !Ref EnableHttpIngress
     - "true"
   CreateApplicationInternetEgress: !Equals
     - !Ref AllowApplicationInternetEgress
+    - "true"
+  CreateLoadBalancerBackendRouting: !Equals
+    - !Ref EnableLoadBalancerBackendRouting
     - "true"
 
 Resources:
@@ -228,6 +252,28 @@ Resources:
       SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
       ToPort: 3000
 
+  PublicLoadBalancerToBackendEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: CreateLoadBalancerBackendRouting
+    Properties:
+      Description: Forward API requests to the FastAPI backend
+      DestinationSecurityGroupId: !Ref BackendSecurityGroup
+      FromPort: 8000
+      GroupId: !Ref PublicLoadBalancerSecurityGroup
+      IpProtocol: tcp
+      ToPort: 8000
+
+  BackendFromPublicLoadBalancerIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateLoadBalancerBackendRouting
+    Properties:
+      Description: Receive API requests from the public load balancer
+      FromPort: 8000
+      GroupId: !Ref BackendSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+      ToPort: 8000
+
   FrontendToBackendEgress:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
@@ -237,6 +283,26 @@ Resources:
       GroupId: !Ref FrontendSecurityGroup
       IpProtocol: tcp
       ToPort: 8000
+
+  FrontendDnsUdpEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: !Ref VpcCidr
+      Description: Resolve private and AWS service DNS names
+      FromPort: 53
+      GroupId: !Ref FrontendSecurityGroup
+      IpProtocol: udp
+      ToPort: 53
+
+  FrontendDnsTcpEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: !Ref VpcCidr
+      Description: Resolve large DNS responses over TCP
+      FromPort: 53
+      GroupId: !Ref FrontendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 53
 
   BackendFromFrontendIngress:
     Type: AWS::EC2::SecurityGroupIngress
@@ -257,6 +323,26 @@ Resources:
       GroupId: !Ref BackendSecurityGroup
       IpProtocol: tcp
       ToPort: 5432
+
+  BackendDnsUdpEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: !Ref VpcCidr
+      Description: Resolve private and AWS service DNS names
+      FromPort: 53
+      GroupId: !Ref BackendSecurityGroup
+      IpProtocol: udp
+      ToPort: 53
+
+  BackendDnsTcpEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: !Ref VpcCidr
+      Description: Resolve large DNS responses over TCP
+      FromPort: 53
+      GroupId: !Ref BackendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 53
 
   DatabaseFromBackendIngress:
     Type: AWS::EC2::SecurityGroupIngress

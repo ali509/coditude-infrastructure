@@ -6,15 +6,16 @@ SECURITY_TEMPLATE := infrastructure/nested/security.yaml
 DATABASE_TEMPLATE := infrastructure/nested/database.yaml
 CONTAINER_FOUNDATION_TEMPLATE := infrastructure/nested/container-foundation.yaml
 CONTAINER_APPLICATION_TEMPLATE := infrastructure/nested/container-application.yaml
+EC2_PLATFORM_TEMPLATE := infrastructure/nested/ec2-platform.yaml
 GUARD_RULES := infrastructure/policies/security.guard
 
-.PHONY: infra-lint infra-guard root-lint network-validate security-validate database-validate container-foundation-validate container-application-validate infra-validate
+.PHONY: infra-lint infra-guard root-lint network-validate security-validate database-validate container-foundation-validate container-application-validate ec2-platform-validate infra-validate
 
 infra-lint:
 	cfn-lint --format json --regions $(AWS_REGION) \
 		--template $(ROOT_TEMPLATE) $(NETWORK_TEMPLATE) $(SECURITY_TEMPLATE) \
 		$(DATABASE_TEMPLATE) $(CONTAINER_FOUNDATION_TEMPLATE) \
-		$(CONTAINER_APPLICATION_TEMPLATE)
+		$(CONTAINER_APPLICATION_TEMPLATE) $(EC2_PLATFORM_TEMPLATE)
 
 root-lint:
 	cfn-lint --regions $(AWS_REGION) --template $(ROOT_TEMPLATE)
@@ -57,5 +58,10 @@ container-application-validate:
 		--profile $(AWS_PROFILE) \
 		--region $(AWS_REGION)
 
-infra-validate: infra-lint network-validate security-validate database-validate container-foundation-validate container-application-validate
+ec2-platform-validate:
+	aws cloudformation validate-template \
+		--template-body file://$(EC2_PLATFORM_TEMPLATE) \
+		--profile $(AWS_PROFILE) \
+		--region $(AWS_REGION)
 
+infra-validate: infra-lint network-validate security-validate database-validate container-foundation-validate container-application-validate ec2-platform-validate
