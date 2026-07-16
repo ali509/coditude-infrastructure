@@ -22,7 +22,7 @@ infrastructure/
     container-foundation.yaml
     container-application.yaml
     ec2-platform.yaml
-    native-cicd.yaml           # planned
+    github-oidc.yaml
   policies/
     security.guard
 ```
@@ -46,6 +46,8 @@ CloudFormation root stack.
 6. `ec2-platform.yaml` creates the non-containerized ALB, private frontend and
    backend Auto Scaling groups, CodeDeploy resources, Systems Manager access,
    CloudWatch logs, scaling policies, and basic alarms.
+7. `github-oidc.yaml` creates the credential-free GitHub Actions trust and
+   application deployment role for ECS and EC2 releases.
 
 The container platform is split into foundation and application stacks because
 the ECR repositories must exist before the first immutable images can be
@@ -78,6 +80,13 @@ receive a non-secret `BACKEND_URL` environment file that points to the
 Application Load Balancer. Backend database credentials are not placed in
 CloudFormation user data or CodeDeploy bundles. The backend reads the
 RDS-managed secret at startup using its EC2 instance role.
+
+The EC2 Auto Scaling groups use EC2 instance health rather than ELB health.
+CodeDeploy intentionally removes instances from target groups during in-place
+deployments; using ELB health at the Auto Scaling layer would replace healthy
+instances while they are draining. Application health remains enforced by
+CodeDeploy validation hooks, ALB target checks, CloudWatch alarms, and
+automatic rollback.
 
 ## Basic Monitoring
 
@@ -139,10 +148,79 @@ application deployment workflow:
 - ECS cluster name
 - Frontend and backend ECS service names
 - Frontend and backend ECR repository URIs
+- EC2 CodeDeploy artifact bucket, applications, and deployment groups
 
 The application repository builds and publishes immutable images. It does not
 run CloudFormation. This repository provisions and changes the platform. It
 does not build application source.
+
+## GitHub OIDC Deployment Role
+
+Deploy `github-oidc.yaml` once per environment and configure its
+`GitHubDeploymentRoleArn` output as the `AWS_ROLE_ARN` variable in the matching
+GitHub Environment. Also configure `AWS_REGION`.
+
+```bash
+aws cloudformation deploy \
+  --stack-name coditude-dev-github-oidc \
+  --template-file infrastructure/nested/github-oidc.yaml \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+    ProjectName=coditude \
+    Environment=dev \
+  --profile coditude-dev \
+  --region ap-south-1
+```
+
+The role can publish ECR images, update existing ECS services, upload immutable
+CodeDeploy artifacts under the EC2 platform bucket, and create deployments for
+the environment's frontend and backend deployment groups. The application
+workflows do not create EC2, networking, database, or load-balancer resources.
+
+## EC2 Deployment And Testing
+
+Create the EC2 platform through a reviewed CloudFormation change set. The
+template creates one private frontend and backend Auto Scaling group,
+CodeDeploy applications and deployment groups, an ALB, CloudWatch logs,
+scaling, and alarms.
+
+After the stack completes, run **Deploy EC2** from the application repository.
+Select `bootstrap=true` for the first release only. Later releases use
+`bootstrap=false`.
+
+Inspect the platform:
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name coditude-dev-ec2-platform \
+  --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' \
+  --output json \
+  --profile coditude-dev \
+  --region ap-south-1
+
+aws autoscaling describe-auto-scaling-groups \
+  --query 'AutoScalingGroups[?starts_with(AutoScalingGroupName, `coditude-dev-ec2-platform`)].{Name:AutoScalingGroupName,Desired:DesiredCapacity,Instances:Instances[].InstanceId}' \
+  --output table \
+  --profile coditude-dev \
+  --region ap-south-1
+```
+
+Verify the deployed application with the `ApplicationUrl` stack output:
+
+```bash
+curl http://EC2_ALB_DNS/
+curl http://EC2_ALB_DNS/api/v1/message
+```
+
+The API response should contain:
+
+```json
+{
+  "message": "Backend is running successfully",
+  "environment": "dev",
+  "source": "postgresql"
+}
+```
 
 ## Multi-Environment Strategy
 
