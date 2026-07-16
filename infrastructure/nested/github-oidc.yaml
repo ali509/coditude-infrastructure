@@ -198,6 +198,13 @@ Resources:
                 Action:
                   - codedeploy:GetDeploymentConfig
                 Resource: !Sub "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentconfig:*"
+              - Effect: Allow
+                Action:
+                  - codedeploy:RegisterApplicationRevision
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:codedeploy:${AWS::Region}:${AWS::AccountId}:application:${Project}-${Stage}-*"
+                  - Project: !Ref ProjectName
+                    Stage: !Ref Environment
       Tags:
         - Key: Project
           Value: coditude
