@@ -1,0 +1,4 @@
+regions:
+  - ap-south-1
+ignore_checks:
+  - W3002

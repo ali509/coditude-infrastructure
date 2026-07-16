@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Creates an encrypted PostgreSQL RDS database in isolated subnets for the
+  Coditude application. RDS manages the master password in Secrets Manager.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Deployment configuration
+        Parameters:
+          - ProjectName
+          - Environment
+          - DatabaseSubnetIds
+          - DatabaseSecurityGroupId
+      - Label:
+          default: Database configuration
+        Parameters:
+          - DatabaseName
+          - MasterUsername
+          - DatabaseInstanceClass
+          - AllocatedStorage
+          - MaximumAllocatedStorage
+          - BackupRetentionDays
+          - EnableMultiAz
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: coditude
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+    ConstraintDescription: >
+      Use 3-21 lowercase letters, numbers, or hyphens, starting with a letter.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment.
+
+  DatabaseSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Isolated subnet IDs used by the RDS subnet group.
+
+  DatabaseSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group that permits PostgreSQL from the backend tier.
+
+  DatabaseName:
+    Type: String
+    Default: coditude
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,62}$"
+    Description: Initial PostgreSQL database name.
+
+  MasterUsername:
+    Type: String
+    Default: dbadmin
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,15}$"
+    Description: >
+      PostgreSQL administrator username. The password is generated and managed
+      by RDS in Secrets Manager.
+
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues:
+      - db.t4g.micro
+      - db.t4g.small
+      - db.t4g.medium
+      - db.m7g.large
+    Description: RDS instance class. Use a larger class for production.
+
+  AllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 65536
+    Description: Initial gp3 storage allocation in GiB.
+
+  MaximumAllocatedStorage:
+    Type: Number
+    Default: 100
+    MinValue: 21
+    MaxValue: 65536
+    Description: >
+      Maximum storage autoscaling limit in GiB. Set this higher than
+      AllocatedStorage.
+
+  BackupRetentionDays:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 35
+    Description: Number of days automated backups are retained.
+
+  EnableMultiAz:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Creates a synchronous standby RDS instance in another AZ.
+
+Rules:
+  ProductionRequiresMultiAz:
+    RuleCondition: !Equals
+      - !Ref Environment
+      - prod
+    Assertions:
+      - Assert: !Equals
+          - !Ref EnableMultiAz
+          - "true"
+        AssertDescription: Production requires Multi-AZ.
+
+Conditions:
+  IsProduction: !Equals
+    - !Ref Environment
+    - prod
+  IsNonProduction: !Not
+    - !Equals
+      - !Ref Environment
+      - prod
+  UseMultiAz: !Equals
+    - !Ref EnableMultiAz
+    - "true"
+
+Resources:
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Isolated subnets for the Coditude PostgreSQL database
+      SubnetIds: !Ref DatabaseSubnetIds
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-database-subnet-group"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  NonProductionDatabaseInstance:
+    Type: AWS::RDS::DBInstance
+    Condition: IsNonProduction
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AllocatedStorage: !Ref AllocatedStorage
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      CopyTagsToSnapshot: true
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBName: !Ref DatabaseName
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DeletionProtection: false
+      EnableIAMDatabaseAuthentication: true
+      Engine: postgres
+      ManageMasterUserPassword: true
+      MasterUsername: !Ref MasterUsername
+      MaxAllocatedStorage: !Ref MaximumAllocatedStorage
+      MultiAZ: !If
+        - UseMultiAz
+        - true
+        - false
+      Port: 5432
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp3
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-postgresql"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ProductionDatabaseInstance:
+    Type: AWS::RDS::DBInstance
+    Condition: IsProduction
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AllocatedStorage: !Ref AllocatedStorage
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      CopyTagsToSnapshot: true
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBName: !Ref DatabaseName
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DeletionProtection: true
+      EnableIAMDatabaseAuthentication: true
+      Engine: postgres
+      ManageMasterUserPassword: true
+      MasterUsername: !Ref MasterUsername
+      MaxAllocatedStorage: !Ref MaximumAllocatedStorage
+      MultiAZ: true
+      Port: 5432
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp3
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-postgresql"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  DatabaseInstanceIdentifier:
+    Description: RDS database instance identifier.
+    Value: !If
+      - IsProduction
+      - !Ref ProductionDatabaseInstance
+      - !Ref NonProductionDatabaseInstance
+
+  DatabaseEndpointAddress:
+    Description: Private DNS endpoint for the PostgreSQL database.
+    Value: !If
+      - IsProduction
+      - !GetAtt ProductionDatabaseInstance.Endpoint.Address
+      - !GetAtt NonProductionDatabaseInstance.Endpoint.Address
+
+  DatabaseEndpointPort:
+    Description: PostgreSQL endpoint port.
+    Value: !If
+      - IsProduction
+      - !GetAtt ProductionDatabaseInstance.Endpoint.Port
+      - !GetAtt NonProductionDatabaseInstance.Endpoint.Port
+
+  DatabaseName:
+    Description: Initial PostgreSQL database name.
+    Value: !Ref DatabaseName
+
+  DatabaseMasterUserSecretArn:
+    Description: >
+      ARN of the Secrets Manager secret generated and maintained by RDS.
+    Value: !If
+      - IsProduction
+      - !GetAtt ProductionDatabaseInstance.MasterUserSecret.SecretArn
+      - !GetAtt NonProductionDatabaseInstance.MasterUserSecret.SecretArn

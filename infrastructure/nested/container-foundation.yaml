@@ -1,0 +1,427 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Creates the shared ECS Fargate foundation for the Coditude application,
+  including ECR repositories, an ECS cluster, CloudWatch log groups, the task
+  execution role, private service discovery, and optional interface endpoints.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Deployment configuration
+        Parameters:
+          - ProjectName
+          - Environment
+          - VpcId
+          - ApplicationSubnetIds
+          - VpcEndpointSecurityGroupId
+      - Label:
+          default: Container platform configuration
+        Parameters:
+          - LogRetentionDays
+          - EnablePrivateEndpoints
+          - EndpointSubnetStrategy
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: coditude
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+    ConstraintDescription: >
+      Use 3-21 lowercase letters, numbers, or hyphens, starting with a letter.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC used by ECS service discovery and interface endpoints.
+
+  ApplicationSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private application subnets used by interface endpoints.
+
+  VpcEndpointSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group attached to interface VPC endpoints.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues:
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 180
+      - 365
+    Description: CloudWatch retention period for application container logs.
+
+  EnablePrivateEndpoints:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Creates interface endpoints required by private Fargate tasks when the
+      application subnets do not have NAT Gateway access.
+
+  EndpointSubnetStrategy:
+    Type: String
+    Default: single
+    AllowedValues:
+      - single
+      - all
+    Description: >
+      Use one endpoint subnet for lower-cost non-production or all application
+      subnets for multi-AZ production resilience.
+
+Rules:
+  ProductionRequiresPrivateEndpoints:
+    RuleCondition: !Equals
+      - !Ref Environment
+      - prod
+    Assertions:
+      - Assert: !Equals
+          - !Ref EnablePrivateEndpoints
+          - "true"
+        AssertDescription: Production requires private AWS service endpoints.
+
+  ProductionRequiresMultiAzEndpoints:
+    RuleCondition: !Equals
+      - !Ref Environment
+      - prod
+    Assertions:
+      - Assert: !Equals
+          - !Ref EndpointSubnetStrategy
+          - all
+        AssertDescription: Production requires endpoints in every application AZ.
+
+Conditions:
+  CreatePrivateEndpoints: !Equals
+    - !Ref EnablePrivateEndpoints
+    - "true"
+  UseAllEndpointSubnets: !Equals
+    - !Ref EndpointSubnetStrategy
+    - all
+
+Resources:
+  FrontendRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      EmptyOnDelete: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after seven days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the newest thirty images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 30
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      RepositoryName: !Sub "${ProjectName}/${Environment}/frontend"
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      EmptyOnDelete: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after seven days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the newest thirty images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 30
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      RepositoryName: !Sub "${ProjectName}/${Environment}/backend"
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ContainerCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      ClusterName: !Sub "${ProjectName}-${Environment}-cluster"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: DEFAULT
+      DefaultCapacityProviderStrategy:
+        - Base: 1
+          CapacityProvider: FARGATE
+          Weight: 1
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/${Environment}/frontend"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/${Environment}/backend"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  PrivateDnsNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Description: Private service discovery namespace for Coditude ECS services
+      Name: !Sub "${Environment}.${ProjectName}.internal"
+      Vpc: !Ref VpcId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreatePrivateEndpoints
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      SubnetIds: !If
+        - UseAllEndpointSubnets
+        - !Ref ApplicationSubnetIds
+        - - !Select
+            - 0
+            - !Ref ApplicationSubnetIds
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+
+  EcrDockerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreatePrivateEndpoints
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      SubnetIds: !If
+        - UseAllEndpointSubnets
+        - !Ref ApplicationSubnetIds
+        - - !Select
+            - 0
+            - !Ref ApplicationSubnetIds
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreatePrivateEndpoints
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      SubnetIds: !If
+        - UseAllEndpointSubnets
+        - !Ref ApplicationSubnetIds
+        - - !Select
+            - 0
+            - !Ref ApplicationSubnetIds
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreatePrivateEndpoints
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      SubnetIds: !If
+        - UseAllEndpointSubnets
+        - !Ref ApplicationSubnetIds
+        - - !Select
+            - 0
+            - !Ref ApplicationSubnetIds
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+
+  SystemsManagerMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreatePrivateEndpoints
+    Properties:
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroupId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      SubnetIds: !If
+        - UseAllEndpointSubnets
+        - !Ref ApplicationSubnetIds
+        - - !Select
+            - 0
+            - !Ref ApplicationSubnetIds
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+
+Outputs:
+  ClusterArn:
+    Description: ARN of the ECS cluster.
+    Value: !GetAtt ContainerCluster.Arn
+
+  ClusterName:
+    Description: Name of the ECS cluster.
+    Value: !Ref ContainerCluster
+
+  FrontendRepositoryUri:
+    Description: URI of the frontend ECR repository.
+    Value: !GetAtt FrontendRepository.RepositoryUri
+
+  BackendRepositoryUri:
+    Description: URI of the backend ECR repository.
+    Value: !GetAtt BackendRepository.RepositoryUri
+
+  FrontendLogGroupName:
+    Description: CloudWatch log group for frontend containers.
+    Value: !Ref FrontendLogGroup
+
+  BackendLogGroupName:
+    Description: CloudWatch log group for backend containers.
+    Value: !Ref BackendLogGroup
+
+  TaskExecutionRoleArn:
+    Description: IAM role used by ECS to pull images and write container logs.
+    Value: !GetAtt TaskExecutionRole.Arn
+
+  PrivateDnsNamespaceArn:
+    Description: ARN of the private service discovery namespace.
+    Value: !GetAtt PrivateDnsNamespace.Arn
+
+  PrivateDnsNamespaceId:
+    Description: ID of the private service discovery namespace.
+    Value: !Ref PrivateDnsNamespace

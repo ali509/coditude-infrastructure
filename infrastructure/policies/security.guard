@@ -1,0 +1,17 @@
+let rds_instances = Resources.*[Type == "AWS::RDS::DBInstance"]
+let ecr_repositories = Resources.*[Type == "AWS::ECR::Repository"]
+let log_groups = Resources.*[Type == "AWS::Logs::LogGroup"]
+
+rule rds_storage_is_encrypted when %rds_instances !empty {
+  %rds_instances.Properties.StorageEncrypted == true
+  %rds_instances.Properties.PubliclyAccessible == false
+}
+
+rule ecr_scans_images_and_uses_immutable_tags when %ecr_repositories !empty {
+  %ecr_repositories.Properties.ImageScanningConfiguration.ScanOnPush == true
+  %ecr_repositories.Properties.ImageTagMutability == "IMMUTABLE"
+}
+
+rule cloudwatch_logs_have_retention when %log_groups !empty {
+  %log_groups.Properties.RetentionInDays exists
+}

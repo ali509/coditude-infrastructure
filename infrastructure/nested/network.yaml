@@ -1,0 +1,777 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Creates the multi-AZ VPC, public subnets, private application subnets,
+  isolated database subnets, routing, optional NAT gateways, an optional S3
+  gateway endpoint, and optional VPC Flow Logs for the Coditude assessment.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Deployment configuration
+        Parameters:
+          - ProjectName
+          - Environment
+      - Label:
+          default: Network features and cost controls
+        Parameters:
+          - NatGatewayStrategy
+          - EnableS3Endpoint
+          - EnableFlowLogs
+          - FlowLogRetentionDays
+    ParameterLabels:
+      ProjectName:
+        default: Project name
+      Environment:
+        default: Environment
+      NatGatewayStrategy:
+        default: NAT Gateway strategy
+      EnableS3Endpoint:
+        default: Create S3 gateway endpoint
+      EnableFlowLogs:
+        default: Enable VPC Flow Logs
+      FlowLogRetentionDays:
+        default: Flow-log retention in days
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: coditude
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+    ConstraintDescription: >
+      Use 3-21 lowercase letters, numbers, or hyphens, starting with a letter.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment.
+
+  NatGatewayStrategy:
+    Type: String
+    Default: none
+    AllowedValues:
+      - none
+      - single
+      - per-az
+    Description: >
+      Use none for network-only testing, single for cost-optimized non-production,
+      and per-az for high availability.
+
+  EnableS3Endpoint:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Creates an S3 gateway endpoint for private application subnets.
+
+  EnableFlowLogs:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Sends all VPC Flow Logs to CloudWatch Logs when enabled.
+
+  FlowLogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 180
+      - 365
+    Description: CloudWatch retention period for VPC Flow Logs.
+
+Mappings:
+  EnvironmentNetwork:
+    dev:
+      VpcCidr: 10.10.0.0/16
+      PublicSubnetAz1Cidr: 10.10.0.0/24
+      PublicSubnetAz2Cidr: 10.10.1.0/24
+      PublicSubnetAz3Cidr: 10.10.2.0/24
+      ApplicationSubnetAz1Cidr: 10.10.16.0/20
+      ApplicationSubnetAz2Cidr: 10.10.32.0/20
+      ApplicationSubnetAz3Cidr: 10.10.48.0/20
+      DatabaseSubnetAz1Cidr: 10.10.64.0/24
+      DatabaseSubnetAz2Cidr: 10.10.65.0/24
+      DatabaseSubnetAz3Cidr: 10.10.66.0/24
+    staging:
+      VpcCidr: 10.20.0.0/16
+      PublicSubnetAz1Cidr: 10.20.0.0/24
+      PublicSubnetAz2Cidr: 10.20.1.0/24
+      PublicSubnetAz3Cidr: 10.20.2.0/24
+      ApplicationSubnetAz1Cidr: 10.20.16.0/20
+      ApplicationSubnetAz2Cidr: 10.20.32.0/20
+      ApplicationSubnetAz3Cidr: 10.20.48.0/20
+      DatabaseSubnetAz1Cidr: 10.20.64.0/24
+      DatabaseSubnetAz2Cidr: 10.20.65.0/24
+      DatabaseSubnetAz3Cidr: 10.20.66.0/24
+    prod:
+      VpcCidr: 10.30.0.0/16
+      PublicSubnetAz1Cidr: 10.30.0.0/24
+      PublicSubnetAz2Cidr: 10.30.1.0/24
+      PublicSubnetAz3Cidr: 10.30.2.0/24
+      ApplicationSubnetAz1Cidr: 10.30.16.0/20
+      ApplicationSubnetAz2Cidr: 10.30.32.0/20
+      ApplicationSubnetAz3Cidr: 10.30.48.0/20
+      DatabaseSubnetAz1Cidr: 10.30.64.0/24
+      DatabaseSubnetAz2Cidr: 10.30.65.0/24
+      DatabaseSubnetAz3Cidr: 10.30.66.0/24
+
+Rules:
+  ProductionRequiresPerAzNat:
+    RuleCondition: !Equals
+      - !Ref Environment
+      - prod
+    Assertions:
+      - Assert: !Equals
+          - !Ref NatGatewayStrategy
+          - per-az
+        AssertDescription: Production requires one NAT Gateway per Availability Zone.
+
+  ProductionRequiresFlowLogs:
+    RuleCondition: !Equals
+      - !Ref Environment
+      - prod
+    Assertions:
+      - Assert: !Equals
+          - !Ref EnableFlowLogs
+          - "true"
+        AssertDescription: Production requires VPC Flow Logs.
+
+Conditions:
+  CreateNatGateway: !Not
+    - !Equals
+      - !Ref NatGatewayStrategy
+      - none
+  CreateNatGatewayPerAz: !Equals
+    - !Ref NatGatewayStrategy
+    - per-az
+  CreateS3Endpoint: !Equals
+    - !Ref EnableS3Endpoint
+    - "true"
+  CreateFlowLogs: !Equals
+    - !Ref EnableFlowLogs
+    - "true"
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-vpc"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-igw"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicSubnetAz1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - PublicSubnetAz1Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-subnet-az1"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: public
+        - Key: ManagedBy
+          Value: cloudformation
+
+  PublicSubnetAz2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - PublicSubnetAz2Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-subnet-az2"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: public
+        - Key: ManagedBy
+          Value: cloudformation
+
+  PublicSubnetAz3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 2
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - PublicSubnetAz3Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-subnet-az3"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: public
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ApplicationSubnetAz1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - ApplicationSubnetAz1Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-subnet-az1"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: application
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ApplicationSubnetAz2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - ApplicationSubnetAz2Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-subnet-az2"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: application
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ApplicationSubnetAz3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 2
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - ApplicationSubnetAz3Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-subnet-az3"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: application
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DatabaseSubnetAz1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - DatabaseSubnetAz1Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-db-subnet-az1"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: database
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DatabaseSubnetAz2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - DatabaseSubnetAz2Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-db-subnet-az2"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: database
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DatabaseSubnetAz3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 2
+        - !GetAZs ""
+      CidrBlock: !FindInMap
+        - EnvironmentNetwork
+        - !Ref Environment
+        - DatabaseSubnetAz3Cidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-db-subnet-az3"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Tier
+          Value: database
+        - Key: ManagedBy
+          Value: cloudformation
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-rt"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetAz1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAz1
+
+  PublicSubnetAz2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAz2
+
+  PublicSubnetAz3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAz3
+
+  ApplicationRouteTableAz1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-rt-az1"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ApplicationRouteTableAz2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-rt-az2"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ApplicationRouteTableAz3:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-app-rt-az3"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ApplicationSubnetAz1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref ApplicationRouteTableAz1
+      SubnetId: !Ref ApplicationSubnetAz1
+
+  ApplicationSubnetAz2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref ApplicationRouteTableAz2
+      SubnetId: !Ref ApplicationSubnetAz2
+
+  ApplicationSubnetAz3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref ApplicationRouteTableAz3
+      SubnetId: !Ref ApplicationSubnetAz3
+
+  NatGatewayEipAz1:
+    Type: AWS::EC2::EIP
+    Condition: CreateNatGateway
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-nat-eip-az1"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  NatGatewayAz1:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEipAz1.AllocationId
+      SubnetId: !Ref PublicSubnetAz1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-nat-az1"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  NatGatewayEipAz2:
+    Type: AWS::EC2::EIP
+    Condition: CreateNatGatewayPerAz
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-nat-eip-az2"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  NatGatewayAz2:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNatGatewayPerAz
+    Properties:
+      AllocationId: !GetAtt NatGatewayEipAz2.AllocationId
+      SubnetId: !Ref PublicSubnetAz2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-nat-az2"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  NatGatewayEipAz3:
+    Type: AWS::EC2::EIP
+    Condition: CreateNatGatewayPerAz
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-nat-eip-az3"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  NatGatewayAz3:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNatGatewayPerAz
+    Properties:
+      AllocationId: !GetAtt NatGatewayEipAz3.AllocationId
+      SubnetId: !Ref PublicSubnetAz3
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-nat-az3"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ApplicationDefaultRouteAz1:
+    Type: AWS::EC2::Route
+    Condition: CreateNatGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayAz1
+      RouteTableId: !Ref ApplicationRouteTableAz1
+
+  ApplicationDefaultRouteAz2:
+    Type: AWS::EC2::Route
+    Condition: CreateNatGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If
+        - CreateNatGatewayPerAz
+        - !Ref NatGatewayAz2
+        - !Ref NatGatewayAz1
+      RouteTableId: !Ref ApplicationRouteTableAz2
+
+  ApplicationDefaultRouteAz3:
+    Type: AWS::EC2::Route
+    Condition: CreateNatGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If
+        - CreateNatGatewayPerAz
+        - !Ref NatGatewayAz3
+        - !Ref NatGatewayAz1
+      RouteTableId: !Ref ApplicationRouteTableAz3
+
+  DatabaseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-db-rt"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DatabaseSubnetAz1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DatabaseRouteTable
+      SubnetId: !Ref DatabaseSubnetAz1
+
+  DatabaseSubnetAz2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DatabaseRouteTable
+      SubnetId: !Ref DatabaseSubnetAz2
+
+  DatabaseSubnetAz3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DatabaseRouteTable
+      SubnetId: !Ref DatabaseSubnetAz3
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateS3Endpoint
+    Properties:
+      RouteTableIds:
+        - !Ref ApplicationRouteTableAz1
+        - !Ref ApplicationRouteTableAz2
+        - !Ref ApplicationRouteTableAz3
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      VpcId: !Ref Vpc
+
+  FlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateFlowLogs
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/vpc/${ProjectName}/${Environment}/flow-logs"
+      RetentionInDays: !Ref FlowLogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  FlowLogsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateFlowLogs
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: publish-vpc-flow-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "${FlowLogGroup.Arn}:*"
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  VpcFlowLog:
+    Type: AWS::EC2::FlowLog
+    Condition: CreateFlowLogs
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogsRole.Arn
+      LogDestination: !GetAtt FlowLogGroup.Arn
+      LogDestinationType: cloud-watch-logs
+      MaxAggregationInterval: 60
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-vpc-flow-log"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  VpcId:
+    Description: ID of the VPC created by this stack.
+    Value: !Ref Vpc
+
+  VpcCidr:
+    Description: CIDR range assigned to the VPC.
+    Value: !GetAtt Vpc.CidrBlock
+
+  AvailabilityZones:
+    Description: Availability Zones used by this VPC.
+    Value: !Join
+      - ","
+      - - !Select [0, !GetAZs ""]
+        - !Select [1, !GetAZs ""]
+        - !Select [2, !GetAZs ""]
+
+  PublicSubnetIds:
+    Description: Comma-separated public subnet IDs.
+    Value: !Join
+      - ","
+      - - !Ref PublicSubnetAz1
+        - !Ref PublicSubnetAz2
+        - !Ref PublicSubnetAz3
+
+  ApplicationSubnetIds:
+    Description: Comma-separated private application subnet IDs.
+    Value: !Join
+      - ","
+      - - !Ref ApplicationSubnetAz1
+        - !Ref ApplicationSubnetAz2
+        - !Ref ApplicationSubnetAz3
+
+  DatabaseSubnetIds:
+    Description: Comma-separated isolated database subnet IDs.
+    Value: !Join
+      - ","
+      - - !Ref DatabaseSubnetAz1
+        - !Ref DatabaseSubnetAz2
+        - !Ref DatabaseSubnetAz3
+
+  ApplicationRouteTableIds:
+    Description: Comma-separated application route-table IDs.
+    Value: !Join
+      - ","
+      - - !Ref ApplicationRouteTableAz1
+        - !Ref ApplicationRouteTableAz2
+        - !Ref ApplicationRouteTableAz3
+
+  DatabaseRouteTableId:
+    Description: Route-table ID used by the isolated database subnets.
+    Value: !Ref DatabaseRouteTable
+
+  S3GatewayEndpointId:
+    Condition: CreateS3Endpoint
+    Description: ID of the S3 gateway VPC endpoint.
+    Value: !Ref S3GatewayEndpoint
+
+  VpcFlowLogId:
+    Condition: CreateFlowLogs
+    Description: ID of the VPC Flow Log.
+    Value: !Ref VpcFlowLog

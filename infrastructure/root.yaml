@@ -1,0 +1,400 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Root CloudFormation template for the Coditude DevOps assessment. It
+  orchestrates reusable network, security, database, container foundation, and
+  container application nested stacks.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Deployment configuration
+        Parameters:
+          - ProjectName
+          - Environment
+          - AllowedWebCidr
+      - Label:
+          default: Optional deployment layers
+        Parameters:
+          - DeployDatabase
+          - DeployContainerFoundation
+          - EnablePrivateEndpoints
+          - DeployContainerApplication
+      - Label:
+          default: Container application release
+        Parameters:
+          - FrontendImageTag
+          - BackendImageTag
+          - CertificateArn
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: coditude
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+  AllowedWebCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: "^(([0-9]{1,3}\\.){3}[0-9]{1,3})/([0-9]|[12][0-9]|3[0-2])$"
+    Description: Client CIDR allowed to access the public load balancer.
+
+  DeployDatabase:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  DeployContainerFoundation:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  EnablePrivateEndpoints:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Creates billable interface endpoints when the container foundation is
+      deployed.
+
+  DeployContainerApplication:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  FrontendImageTag:
+    Type: String
+    Default: initial
+    AllowedPattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"
+
+  BackendImageTag:
+    Type: String
+    Default: initial
+    AllowedPattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"
+
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: Optional ACM certificate ARN for an HTTPS listener.
+
+Mappings:
+  EnvironmentConfig:
+    dev:
+      NatGatewayStrategy: none
+      EnableFlowLogs: "false"
+      DatabaseInstanceClass: db.t4g.micro
+      BackupRetentionDays: 1
+      EnableMultiAz: "false"
+      LogRetentionDays: 14
+      EndpointSubnetStrategy: single
+      FrontendDesiredCount: 1
+      FrontendMaximumCount: 3
+      BackendDesiredCount: 1
+      BackendMaximumCount: 3
+    staging:
+      NatGatewayStrategy: single
+      EnableFlowLogs: "false"
+      DatabaseInstanceClass: db.t4g.small
+      BackupRetentionDays: 7
+      EnableMultiAz: "true"
+      LogRetentionDays: 30
+      EndpointSubnetStrategy: single
+      FrontendDesiredCount: 1
+      FrontendMaximumCount: 4
+      BackendDesiredCount: 1
+      BackendMaximumCount: 4
+    prod:
+      NatGatewayStrategy: per-az
+      EnableFlowLogs: "true"
+      DatabaseInstanceClass: db.t4g.medium
+      BackupRetentionDays: 30
+      EnableMultiAz: "true"
+      LogRetentionDays: 90
+      EndpointSubnetStrategy: all
+      FrontendDesiredCount: 2
+      FrontendMaximumCount: 10
+      BackendDesiredCount: 2
+      BackendMaximumCount: 10
+
+Rules:
+  ContainerApplicationRequiresDatabase:
+    RuleCondition: !Equals
+      - !Ref DeployContainerApplication
+      - "true"
+    Assertions:
+      - Assert: !Equals
+          - !Ref DeployDatabase
+          - "true"
+        AssertDescription: The container application requires the database stack.
+
+  ContainerApplicationRequiresFoundation:
+    RuleCondition: !Equals
+      - !Ref DeployContainerApplication
+      - "true"
+    Assertions:
+      - Assert: !Equals
+          - !Ref DeployContainerFoundation
+          - "true"
+        AssertDescription: >
+          The container application requires the container foundation stack.
+
+  ContainerApplicationRequiresEndpoints:
+    RuleCondition: !Equals
+      - !Ref DeployContainerApplication
+      - "true"
+    Assertions:
+      - Assert: !Equals
+          - !Ref EnablePrivateEndpoints
+          - "true"
+        AssertDescription: >
+          Private Fargate services require interface endpoints when NAT is not
+          guaranteed.
+
+  PrivateEndpointsRequireFoundation:
+    RuleCondition: !Equals
+      - !Ref EnablePrivateEndpoints
+      - "true"
+    Assertions:
+      - Assert: !Equals
+          - !Ref DeployContainerFoundation
+          - "true"
+        AssertDescription: Interface endpoints belong to the container foundation.
+
+Conditions:
+  CreateDatabase: !Equals
+    - !Ref DeployDatabase
+    - "true"
+  CreateContainerFoundation: !Equals
+    - !Ref DeployContainerFoundation
+    - "true"
+  CreateContainerApplication: !Equals
+    - !Ref DeployContainerApplication
+    - "true"
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: nested/network.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        NatGatewayStrategy: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - NatGatewayStrategy
+        EnableS3Endpoint: "true"
+        EnableFlowLogs: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - EnableFlowLogs
+        FlowLogRetentionDays: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: nested/security.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        AllowedWebCidr: !Ref AllowedWebCidr
+        EnableHttpIngress: "true"
+        AllowApplicationInternetEgress: "false"
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateDatabase
+    Properties:
+      TemplateURL: nested/database.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        DatabaseSubnetIds: !GetAtt NetworkStack.Outputs.DatabaseSubnetIds
+        DatabaseSecurityGroupId: !GetAtt SecurityStack.Outputs.DatabaseSecurityGroupId
+        DatabaseName: coditude
+        MasterUsername: dbadmin
+        DatabaseInstanceClass: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - DatabaseInstanceClass
+        AllocatedStorage: 20
+        MaximumAllocatedStorage: 100
+        BackupRetentionDays: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - BackupRetentionDays
+        EnableMultiAz: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - EnableMultiAz
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ContainerFoundationStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateContainerFoundation
+    Properties:
+      TemplateURL: nested/container-foundation.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        ApplicationSubnetIds: !GetAtt NetworkStack.Outputs.ApplicationSubnetIds
+        VpcEndpointSecurityGroupId: !GetAtt SecurityStack.Outputs.VpcEndpointSecurityGroupId
+        LogRetentionDays: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - LogRetentionDays
+        EnablePrivateEndpoints: !Ref EnablePrivateEndpoints
+        EndpointSubnetStrategy: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - EndpointSubnetStrategy
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  ContainerApplicationStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateContainerApplication
+    Properties:
+      TemplateURL: nested/container-application.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnetIds: !GetAtt NetworkStack.Outputs.PublicSubnetIds
+        ApplicationSubnetIds: !GetAtt NetworkStack.Outputs.ApplicationSubnetIds
+        PublicLoadBalancerSecurityGroupId: !GetAtt SecurityStack.Outputs.PublicLoadBalancerSecurityGroupId
+        FrontendSecurityGroupId: !GetAtt SecurityStack.Outputs.FrontendSecurityGroupId
+        BackendSecurityGroupId: !GetAtt SecurityStack.Outputs.BackendSecurityGroupId
+        DatabaseEndpointAddress: !GetAtt DatabaseStack.Outputs.DatabaseEndpointAddress
+        DatabaseEndpointPort: !GetAtt DatabaseStack.Outputs.DatabaseEndpointPort
+        DatabaseName: !GetAtt DatabaseStack.Outputs.DatabaseName
+        DatabaseMasterUserSecretArn: !GetAtt DatabaseStack.Outputs.DatabaseMasterUserSecretArn
+        ClusterArn: !GetAtt ContainerFoundationStack.Outputs.ClusterArn
+        ClusterName: !GetAtt ContainerFoundationStack.Outputs.ClusterName
+        FrontendRepositoryUri: !GetAtt ContainerFoundationStack.Outputs.FrontendRepositoryUri
+        BackendRepositoryUri: !GetAtt ContainerFoundationStack.Outputs.BackendRepositoryUri
+        FrontendLogGroupName: !GetAtt ContainerFoundationStack.Outputs.FrontendLogGroupName
+        BackendLogGroupName: !GetAtt ContainerFoundationStack.Outputs.BackendLogGroupName
+        TaskExecutionRoleArn: !GetAtt ContainerFoundationStack.Outputs.TaskExecutionRoleArn
+        PrivateDnsNamespaceId: !GetAtt ContainerFoundationStack.Outputs.PrivateDnsNamespaceId
+        FrontendImageTag: !Ref FrontendImageTag
+        BackendImageTag: !Ref BackendImageTag
+        CertificateArn: !Ref CertificateArn
+        FrontendDesiredCount: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - FrontendDesiredCount
+        FrontendMaximumCount: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - FrontendMaximumCount
+        BackendDesiredCount: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - BackendDesiredCount
+        BackendMaximumCount: !FindInMap
+          - EnvironmentConfig
+          - !Ref Environment
+          - BackendMaximumCount
+      Tags:
+        - Key: Project
+          Value: coditude
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  VpcId:
+    Description: VPC created by the network nested stack.
+    Value: !GetAtt NetworkStack.Outputs.VpcId
+
+  PublicSubnetIds:
+    Description: Public subnets created by the network nested stack.
+    Value: !GetAtt NetworkStack.Outputs.PublicSubnetIds
+
+  ApplicationSubnetIds:
+    Description: Private application subnets created by the network nested stack.
+    Value: !GetAtt NetworkStack.Outputs.ApplicationSubnetIds
+
+  DatabaseEndpointAddress:
+    Condition: CreateDatabase
+    Description: PostgreSQL endpoint created by the database nested stack.
+    Value: !GetAtt DatabaseStack.Outputs.DatabaseEndpointAddress
+
+  FrontendRepositoryUri:
+    Condition: CreateContainerFoundation
+    Description: Frontend ECR repository URI.
+    Value: !GetAtt ContainerFoundationStack.Outputs.FrontendRepositoryUri
+
+  BackendRepositoryUri:
+    Condition: CreateContainerFoundation
+    Description: Backend ECR repository URI.
+    Value: !GetAtt ContainerFoundationStack.Outputs.BackendRepositoryUri
+
+  ClusterName:
+    Condition: CreateContainerFoundation
+    Description: ECS cluster used by the application deployment workflow.
+    Value: !GetAtt ContainerFoundationStack.Outputs.ClusterName
+
+  FrontendServiceName:
+    Condition: CreateContainerApplication
+    Description: Frontend ECS service updated by application releases.
+    Value: !GetAtt ContainerApplicationStack.Outputs.FrontendServiceName
+
+  BackendServiceName:
+    Condition: CreateContainerApplication
+    Description: Backend ECS service updated by application releases.
+    Value: !GetAtt ContainerApplicationStack.Outputs.BackendServiceName
+
+  ApplicationUrl:
+    Condition: CreateContainerApplication
+    Description: Public URL of the containerized application.
+    Value: !GetAtt ContainerApplicationStack.Outputs.ApplicationUrl

@@ -1,0 +1,352 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Creates least-privilege security groups for the public load balancer,
+  frontend, backend, database, and interface VPC endpoints used by the
+  Coditude application.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Deployment configuration
+        Parameters:
+          - ProjectName
+          - Environment
+          - VpcId
+      - Label:
+          default: Ingress and egress controls
+        Parameters:
+          - AllowedWebCidr
+          - EnableHttpIngress
+          - AllowApplicationInternetEgress
+    ParameterLabels:
+      ProjectName:
+        default: Project name
+      Environment:
+        default: Environment
+      VpcId:
+        default: VPC ID
+      AllowedWebCidr:
+        default: Allowed client CIDR
+      EnableHttpIngress:
+        default: Enable HTTP ingress
+      AllowApplicationInternetEgress:
+        default: Allow HTTPS internet egress
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: coditude
+    AllowedPattern: "^[a-z][a-z0-9-]{2,20}$"
+    ConstraintDescription: >
+      Use 3-21 lowercase letters, numbers, or hyphens, starting with a letter.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the application security groups are created.
+
+  AllowedWebCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: "^(([0-9]{1,3}\\.){3}[0-9]{1,3})/([0-9]|[12][0-9]|3[0-2])$"
+    ConstraintDescription: Enter a valid IPv4 CIDR block.
+    Description: IPv4 CIDR allowed to access the public load balancer.
+
+  EnableHttpIngress:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Allows port 80 on the public load balancer. Later, HTTP will redirect
+      to HTTPS.
+
+  AllowApplicationInternetEgress:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Allows frontend and backend workloads to make outbound HTTPS requests.
+      Enable only when private application subnets have NAT access.
+
+Conditions:
+  CreateHttpIngress: !Equals
+    - !Ref EnableHttpIngress
+    - "true"
+  CreateApplicationInternetEgress: !Equals
+    - !Ref AllowApplicationInternetEgress
+    - "true"
+
+Resources:
+  PublicLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public load balancer access for the Coditude application
+      SecurityGroupEgress: []
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-public-alb-sg"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  FrontendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Frontend workload access for the Coditude application
+      SecurityGroupEgress: []
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-frontend-sg"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  BackendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Backend workload access for the Coditude application
+      SecurityGroupEgress: []
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-backend-sg"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL access for the Coditude application
+      SecurityGroupEgress:
+        - CidrIp: 127.0.0.1/32
+          Description: No outbound network access
+          IpProtocol: "-1"
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-database-sg"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS access to interface VPC endpoints
+      SecurityGroupEgress:
+        - CidrIp: 127.0.0.1/32
+          Description: No outbound network access
+          IpProtocol: "-1"
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-vpc-endpoint-sg"
+        - Key: Project
+          Value: coditude
+        - Key: Application
+          Value: coditude-app
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: cloudformation
+
+  PublicLoadBalancerHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateHttpIngress
+    Properties:
+      CidrIp: !Ref AllowedWebCidr
+      Description: HTTP access for redirect to HTTPS
+      FromPort: 80
+      GroupId: !Ref PublicLoadBalancerSecurityGroup
+      IpProtocol: tcp
+      ToPort: 80
+
+  PublicLoadBalancerHttpsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      CidrIp: !Ref AllowedWebCidr
+      Description: HTTPS access to the public application endpoint
+      FromPort: 443
+      GroupId: !Ref PublicLoadBalancerSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+
+  PublicLoadBalancerToFrontendEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Forward requests to the Next.js frontend
+      DestinationSecurityGroupId: !Ref FrontendSecurityGroup
+      FromPort: 3000
+      GroupId: !Ref PublicLoadBalancerSecurityGroup
+      IpProtocol: tcp
+      ToPort: 3000
+
+  FrontendFromPublicLoadBalancerIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Receive requests only from the public load balancer
+      FromPort: 3000
+      GroupId: !Ref FrontendSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSecurityGroup
+      ToPort: 3000
+
+  FrontendToBackendEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow the frontend to call the backend API
+      DestinationSecurityGroupId: !Ref BackendSecurityGroup
+      FromPort: 8000
+      GroupId: !Ref FrontendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 8000
+
+  BackendFromFrontendIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Receive API requests only from the frontend
+      FromPort: 8000
+      GroupId: !Ref BackendSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref FrontendSecurityGroup
+      ToPort: 8000
+
+  BackendToDatabaseEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow the backend to connect to PostgreSQL
+      DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
+      FromPort: 5432
+      GroupId: !Ref BackendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 5432
+
+  DatabaseFromBackendIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Accept PostgreSQL traffic only from the backend
+      FromPort: 5432
+      GroupId: !Ref DatabaseSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref BackendSecurityGroup
+      ToPort: 5432
+
+  FrontendToVpcEndpointsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow frontend access to private AWS service endpoints
+      DestinationSecurityGroupId: !Ref VpcEndpointSecurityGroup
+      FromPort: 443
+      GroupId: !Ref FrontendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+
+  BackendToVpcEndpointsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: Allow backend access to private AWS service endpoints
+      DestinationSecurityGroupId: !Ref VpcEndpointSecurityGroup
+      FromPort: 443
+      GroupId: !Ref BackendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+
+  VpcEndpointsFromFrontendIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Accept HTTPS from frontend workloads
+      FromPort: 443
+      GroupId: !Ref VpcEndpointSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref FrontendSecurityGroup
+      ToPort: 443
+
+  VpcEndpointsFromBackendIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Accept HTTPS from backend workloads
+      FromPort: 443
+      GroupId: !Ref VpcEndpointSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref BackendSecurityGroup
+      ToPort: 443
+
+  FrontendInternetHttpsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: CreateApplicationInternetEgress
+    Properties:
+      CidrIp: 0.0.0.0/0
+      Description: Optional HTTPS internet access through NAT
+      FromPort: 443
+      GroupId: !Ref FrontendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+
+  BackendInternetHttpsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: CreateApplicationInternetEgress
+    Properties:
+      CidrIp: 0.0.0.0/0
+      Description: Optional HTTPS internet access through NAT
+      FromPort: 443
+      GroupId: !Ref BackendSecurityGroup
+      IpProtocol: tcp
+      ToPort: 443
+
+Outputs:
+  PublicLoadBalancerSecurityGroupId:
+    Description: Security group ID for the public Application Load Balancer.
+    Value: !Ref PublicLoadBalancerSecurityGroup
+
+  FrontendSecurityGroupId:
+    Description: Security group ID for frontend ECS tasks or EC2 instances.
+    Value: !Ref FrontendSecurityGroup
+
+  BackendSecurityGroupId:
+    Description: Security group ID for backend ECS tasks or EC2 instances.
+    Value: !Ref BackendSecurityGroup
+
+  DatabaseSecurityGroupId:
+    Description: Security group ID for RDS PostgreSQL.
+    Value: !Ref DatabaseSecurityGroup
+
+  VpcEndpointSecurityGroupId:
+    Description: Security group ID for interface VPC endpoints.
+    Value: !Ref VpcEndpointSecurityGroup
