@@ -28,7 +28,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Install CloudFormation linter
         run: python -m pip install "cfn-lint==1.53.0"
@@ -41,4 +40,3 @@ jobs:
 
       - name: Evaluate CloudFormation Guard policies
         run: make infra-guard
-
