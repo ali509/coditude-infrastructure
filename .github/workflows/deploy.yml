@@ -1,0 +1,166 @@
+name: Infrastructure Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infrastructure/nested/network.yaml"
+      - "infrastructure/nested/security.yaml"
+      - "infrastructure/nested/database.yaml"
+      - "infrastructure/nested/container-foundation.yaml"
+      - "infrastructure/nested/container-application.yaml"
+      - "infrastructure/nested/ec2-platform.yaml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: Existing dev stack to update
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - network
+          - security
+          - database
+          - container-foundation
+          - container-application
+          - ec2-platform
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: infrastructure-deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Update existing stacks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: dev
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      PROJECT_NAME: coditude
+      ENVIRONMENT: dev
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Select stacks
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          components=(
+            network
+            security
+            database
+            container-foundation
+            container-application
+            ec2-platform
+          )
+
+          template_for() {
+            echo "infrastructure/nested/$1.yaml"
+          }
+
+          selected=()
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            requested="${{ inputs.stack }}"
+            if [[ "$requested" == "all" ]]; then
+              selected=("${components[@]}")
+            else
+              selected=("$requested")
+            fi
+          else
+            changed_files=$(git diff --name-only \
+              "${{ github.event.before }}" \
+              "${{ github.sha }}")
+
+            for component in "${components[@]}"; do
+              if grep --fixed-strings --line-regexp --quiet \
+                "$(template_for "$component")" <<< "$changed_files"; then
+                selected+=("$component")
+              fi
+            done
+          fi
+
+          {
+            echo "components<<EOF"
+            if (( ${#selected[@]} > 0 )); then
+              printf '%s\n' "${selected[@]}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if (( ${#selected[@]} == 0 )); then
+            echo "No deployable stack template changed."
+          else
+            printf 'Selected stack: %s\n' "${selected[@]}"
+          fi
+
+      - name: Configure AWS credentials
+        if: ${{ steps.select.outputs.components != '' }}
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: github-infrastructure-${{ github.run_id }}
+
+      - name: Read CloudFormation execution role
+        if: ${{ steps.select.outputs.components != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          execution_role=$(aws cloudformation describe-stacks \
+            --stack-name "${PROJECT_NAME}-${ENVIRONMENT}-github-oidc" \
+            --query "Stacks[0].Outputs[?OutputKey=='InfrastructureCloudFormationExecutionRoleArn'].OutputValue | [0]" \
+            --output text)
+
+          if [[ -z "$execution_role" || "$execution_role" == "None" ]]; then
+            echo "CloudFormation execution role output is missing." >&2
+            exit 1
+          fi
+
+          echo "CFN_EXECUTION_ROLE_ARN=$execution_role" >> "$GITHUB_ENV"
+
+      - name: Update existing CloudFormation stacks
+        if: ${{ steps.select.outputs.components != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r component; do
+            [[ -n "$component" ]] || continue
+
+            stack_name="${PROJECT_NAME}-${ENVIRONMENT}-${component}"
+            template_file="infrastructure/nested/${component}.yaml"
+
+            aws cloudformation describe-stacks \
+              --stack-name "$stack_name" \
+              --output json > /dev/null
+
+            aws cloudformation deploy \
+              --stack-name "$stack_name" \
+              --template-file "$template_file" \
+              --capabilities CAPABILITY_IAM \
+              --role-arn "$CFN_EXECUTION_ROLE_ARN" \
+              --no-fail-on-empty-changeset \
+              --no-cli-pager
+
+            {
+              echo "- \`$stack_name\` updated from \`$template_file\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done <<< "${{ steps.select.outputs.components }}"

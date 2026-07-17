@@ -158,7 +158,10 @@ does not build application source.
 
 Deploy `github-oidc.yaml` once per environment and configure its
 `GitHubDeploymentRoleArn` output as the `AWS_ROLE_ARN` variable in the matching
-GitHub Environment. Also configure `AWS_REGION`.
+application-repository GitHub Environment. Configure the
+`GitHubInfrastructureDeploymentRoleArn` output in the infrastructure
+repository's matching environment. Both repositories also require
+`AWS_REGION`.
 
 ```bash
 aws cloudformation deploy \
@@ -176,6 +179,32 @@ The role can publish ECR images, update existing ECS services, upload immutable
 CodeDeploy artifacts under the EC2 platform bucket, and create deployments for
 the environment's frontend and backend deployment groups. The application
 workflows do not create EC2, networking, database, or load-balancer resources.
+
+## Automatic Infrastructure Updates
+
+Pull requests run CloudFormation lint and policy checks without AWS write
+access. After a deployable template change is merged to `main`,
+**Infrastructure Deploy** assumes the dedicated infrastructure OIDC role and
+updates only the affected existing `dev` stack.
+
+The automatic workflow supports:
+
+- `network.yaml`
+- `security.yaml`
+- `database.yaml`
+- `container-foundation.yaml`
+- `container-application.yaml`
+- `ec2-platform.yaml`
+
+The workflow verifies that the target stack already exists before running
+`aws cloudformation deploy`, preserves its current parameter values, uses a
+dedicated CloudFormation execution role, and waits for the update to complete.
+Updates are serialized to prevent overlapping infrastructure changes.
+
+Changes to `github-oidc.yaml` remain manual because that template controls the
+workflow's own authentication roles. `root.yaml` also remains validation-only
+because this environment was created as independent stacks rather than one
+nested root stack.
 
 ## EC2 Deployment And Testing
 
