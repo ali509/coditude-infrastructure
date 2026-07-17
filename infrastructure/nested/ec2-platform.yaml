@@ -3,7 +3,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Creates the non-containerized Coditude deployment platform using private EC2
   Auto Scaling groups, an Application Load Balancer, CodeDeploy, Systems
-  Manager, CloudWatch logs, scaling policies, and basic operational alarms.
+  Manager, CloudWatch logs, scaling policies, and basic operational alarms . 
 
 Metadata:
   AWS::CloudFormation::Interface:
