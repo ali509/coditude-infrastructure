@@ -3,7 +3,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Creates the multi-AZ VPC, public subnets, private application subnets,
   isolated database subnets, routing, optional NAT gateways, an optional S3
-  gateway endpoint, and optional VPC Flow Logs for the Coditude assessment.
+  gateway endpoint, and optional VPC Flow Logs for the Coditude assessment .
 
 Metadata:
   AWS::CloudFormation::Interface:
