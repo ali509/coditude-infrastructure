@@ -1,17 +1,6 @@
 name: Infrastructure Deploy
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "infrastructure/nested/network.yaml"
-      - "infrastructure/nested/security.yaml"
-      - "infrastructure/nested/database.yaml"
-      - "infrastructure/nested/container-foundation.yaml"
-      - "infrastructure/nested/container-application.yaml"
-      - "infrastructure/nested/ec2-platform.yaml"
-      - ".github/workflows/deploy.yml"
   workflow_dispatch:
     inputs:
       stack:
