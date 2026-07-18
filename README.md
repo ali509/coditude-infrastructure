@@ -10,6 +10,26 @@ Application developers change source code, tests, and Dockerfiles in the
 application repository. Infrastructure changes, IAM, networking, security
 controls, and deployment platform changes are reviewed here.
 
+## Assessment Status
+
+The development environment was deployed and tested in AWS in July 2026 using
+both ECS Fargate and non-containerized EC2 with CodeDeploy. The temporary AWS
+resources were deleted after validation to avoid ongoing charges.
+
+Infrastructure deployment is now manual through the **Infrastructure Deploy**
+GitHub Actions workflow. Validation still runs automatically on pull requests
+and pushes. To recreate the environment, deploy the stacks in this order:
+
+1. Network
+2. Security
+3. Database
+4. Container foundation
+5. Container application or EC2 platform
+6. GitHub OIDC roles before running application deployment workflows
+
+The original assessment question and final submission documents are archived
+separately from this public source repository.
+
 ## Repository Layout
 
 ```text
@@ -180,14 +200,14 @@ CodeDeploy artifacts under the EC2 platform bucket, and create deployments for
 the environment's frontend and backend deployment groups. The application
 workflows do not create EC2, networking, database, or load-balancer resources.
 
-## Automatic Infrastructure Updates
+## Infrastructure Deployment Workflow
 
 Pull requests run CloudFormation lint and policy checks without AWS write
-access. After a deployable template change is merged to `main`,
-**Infrastructure Deploy** assumes the dedicated infrastructure OIDC role and
-updates only the affected existing `dev` stack.
+access. Infrastructure changes are deployed manually from the Actions page
+using **Infrastructure Deploy**. The workflow assumes the dedicated
+infrastructure OIDC role and updates only the selected existing `dev` stack.
 
-The automatic workflow supports:
+The manual workflow supports:
 
 - `network.yaml`
 - `security.yaml`
@@ -196,7 +216,7 @@ The automatic workflow supports:
 - `container-application.yaml`
 - `ec2-platform.yaml`
 
-The workflow verifies that the target stack already exists before running
+The workflow verifies that the selected stack already exists before running
 `aws cloudformation deploy`, preserves its current parameter values, uses a
 dedicated CloudFormation execution role, and waits for the update to complete.
 Updates are serialized to prevent overlapping infrastructure changes.
